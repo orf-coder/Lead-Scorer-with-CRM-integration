@@ -107,12 +107,13 @@ def validate_contact_data(properties):
             sanitized[key] = str(value)
     return sanitized
 
-def score_contact(contact):
+def score_contact(contact, timestamp=None):
     """
     Score a single contact using lead scorer logic with validation and logging.
 
     Args:
         contact: HubSpot contact object or dict
+        timestamp: Optional datetime for time-based scoring
 
     Returns:
         tuple: (score, label, reason) or (0, 'Cold', error_message) on failure
@@ -147,14 +148,6 @@ def score_contact(contact):
             logger.warning(f"Insufficient information for contact {contact_id}")
             return 0, 'Cold', 'Insufficient information for scoring'
 
-        # Score using rule-based
-        rule_score, rule_label, rule_reason, _ = judge_lead(message, job_title, source='hubspot', company=company)
-        rule_confidence = rule_score_to_confidence(rule_score)
-
-        # Initialize variables
-        consensus = rule_label
-        final_label = rule_label
-
         # Load and predict with all ML models
         combined_input = f"{message} {job_title} {company}".strip()
         models_loaded = load_ml_models()
@@ -170,33 +163,23 @@ def score_contact(contact):
             except Exception as e:
                 logger.error(f"Error with model {m.get('name', 'unknown')}: {e}")
 
-        # Determine consensus
+        # Determine ML consensus
         if ml_preds:
             from collections import Counter
             pred_counts = Counter(ml_preds)
             most_common_ml = pred_counts.most_common(1)[0][0]
-            consensus = most_common_ml
-            average_ml_conf = sum(ml_confs) / len(ml_confs) if ml_confs else None
+            final_label = most_common_ml
+            average_ml_conf = sum(ml_confs) / len(ml_confs) if ml_confs else 0.5
+            # Map to score (0-100 based on confidence)
+            rule_score = int(average_ml_conf * 100)
         else:
-            consensus = rule_label
-            average_ml_conf = None
+            # Fallback to rule-based if no ML models
+            rule_score, rule_label, rule_reason, _ = judge_lead(message, job_title, source='hubspot', company=company, timestamp=timestamp)
+            final_label = rule_label
+            average_ml_conf = rule_score_to_confidence(rule_score)
 
-        # Calculate final confidence as average of rule and ML
-        if average_ml_conf is not None:
-            final_confidence = (rule_confidence + average_ml_conf) / 2
-        else:
-            final_confidence = rule_confidence
-
-        final_label = consensus
-
-        # Override final label based on final confidence thresholds
-        if final_confidence < COLD_CONFIDENCE_THRESHOLD:
-            final_label = 'Cold'
-        elif final_confidence > HOT_CONFIDENCE_THRESHOLD:
-            final_label = 'Hot'
-
-        logger.info(f"Contact {contact_id} scored: rule_score={rule_score}, final_label={final_label}, final_conf={final_confidence:.2f}")
-        return rule_score, final_label, rule_reason
+        logger.info(f"Contact {contact_id} scored using ML models: final_label={final_label}, confidence={average_ml_conf:.2f}")
+        return rule_score, final_label, "ML model consensus"
 
     except Exception as e:
         contact_id = getattr(contact, 'id', 'unknown')

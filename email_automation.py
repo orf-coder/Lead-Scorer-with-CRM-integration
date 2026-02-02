@@ -54,15 +54,15 @@ def send_lead_email(recipient_email, lead_label, contact_name, company='', custo
         logger.info(f"Preparing email to {recipient_email} for {lead_label}")
 
         # Email content based on label
-        if lead_label.lower() in ['hot_lead', 'hot']:
+        if lead_label.lower() in ['hot_lead', 'hot lead', 'hot']:
             subject = f"Exciting Opportunity, {contact_name}"
             company_info = f" from {company}" if company else ""
             body = f"Hi {contact_name},\n\nWe noticed your recent interest{company_info} and believe you're an excellent fit for our services. Based on our analysis, your profile aligns well with our target market. We'd love to schedule a quick call to discuss how we can help you achieve your goals. Let us know what time works for you.\n\n{custom_message}\n\nBest regards,\nSales Team"
-        elif lead_label.lower() in ['warm_lead', 'warm']:
+        elif lead_label.lower() in ['warm_lead', 'warm lead', 'warm']:
             subject = f"Follow Up, {contact_name}"
             company_info = f" at {company}" if company else ""
             body = f"Hi {contact_name},\n\nI hope this email finds you well. I'm reaching out to follow up on your recent interest{company_info} and see if there's anything specific we can assist you with at this time. Perhaps we can explore potential collaboration opportunities or answer any questions you might have about our offerings.\n\n{custom_message}\n\nBest regards,\nSales Team"
-        elif lead_label.lower() in ['cold_lead', 'cold']:
+        elif lead_label.lower() in ['cold_lead', 'cold lead', 'cold']:
             subject = f"Resources to Accelerate Your Business Growth, {contact_name}"
             company_info = f" from {company}" if company else ""
             body = f"Hi {contact_name},\n\nThank you for reaching out{company_info}. We're committed to providing value to potential partners like yourself. Here are some resources that might be helpful:\n- Product brochure: https://example.com/brochure\n- Case studies: https://example.com/case-studies\n-  Webinar on industry trends: https://example.com/webinar\n\nFeel free to explore these at your convenience.\n\n{custom_message}\n\nBest regards,\nSales Team"

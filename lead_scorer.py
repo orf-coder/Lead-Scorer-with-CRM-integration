@@ -6,6 +6,40 @@ import numpy as np
 import pandas as pd
 import models
 import importlib.util
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+try:
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+    NLP_AVAILABLE = True
+except ImportError:
+    NLP_AVAILABLE = False
+
+def extract_keywords_nlp(text):
+    """Extract relevant keywords using NLP techniques."""
+    if not NLP_AVAILABLE:
+        return []
+
+    doc = nlp(text.lower())
+    keywords = []
+
+    # Extract noun chunks and important tokens
+    for chunk in doc.noun_chunks:
+        keywords.append(chunk.text)
+
+    # Extract important adjectives and verbs
+    for token in doc:
+        if token.pos_ in ['ADJ', 'VERB'] and not token.is_stop and len(token.text) > 2:
+            keywords.append(token.text)
+
+    # Remove duplicates and short words
+    keywords = list(set(keywords))
+    keywords = [k for k in keywords if len(k.split()) <= 3]  # Keep phrases up to 3 words
+
+    return keywords
 
 # Load the google_sheets module
 gs_path = os.path.join(os.path.dirname(__file__), 'Google', 'google_sheets.py')
@@ -13,7 +47,7 @@ spec = importlib.util.spec_from_file_location("google_sheets", gs_path)
 google_sheets = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(google_sheets)
 
-def judge_lead(message, job_title=None, source=None, company=None):
+def judge_lead(message, job_title=None, source=None, company=None, timestamp=None):
     """Judge a lead based on relevance, intent, and potential scores.
 
     Parameters:
@@ -109,6 +143,10 @@ def judge_lead(message, job_title=None, source=None, company=None):
     source_lower = str(source or "").lower()
     company_lower = str(company or "").lower()
 
+    # Extract dynamic keywords using NLP
+    nlp_keywords = extract_keywords_nlp(message or "")
+    nlp_keywords_lower = [k.lower() for k in nlp_keywords]
+
     relevance_score = 0
     intent_score = 0
     potential_score = 0
@@ -117,6 +155,7 @@ def judge_lead(message, job_title=None, source=None, company=None):
     found_intent = []
     found_potential = []
     found_negative_potential = []
+    found_nlp = []
 
     # Relevance score
     for keyword, score in relevance_keywords.items():
@@ -169,11 +208,56 @@ def judge_lead(message, job_title=None, source=None, company=None):
         potential_score += 10
         found_potential.append("long_message")
 
+    # Time-based weighting: recent interactions get higher scores
+    if timestamp:
+        try:
+            from datetime import datetime
+            if isinstance(timestamp, str):
+                email_date = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            else:
+                email_date = timestamp
+            now = datetime.now(email_date.tzinfo) if email_date.tzinfo else datetime.now()
+            days_diff = (now - email_date).days
+            if days_diff <= 1:
+                potential_score += 15  # Very recent
+                found_potential.append("very_recent")
+            elif days_diff <= 7:
+                potential_score += 10  # Recent week
+                found_potential.append("recent_week")
+            elif days_diff <= 30:
+                potential_score += 5  # Recent month
+                found_potential.append("recent_month")
+        except Exception:
+            pass  # Ignore timestamp errors
+
     # Negative potential
     for keyword, score in negative_potential_keywords.items():
         if keyword in message_lower:
             potential_score += score
             found_negative_potential.append(keyword)
+
+    # Dynamic NLP-based scoring
+    if nlp_keywords:
+        # Relevance keywords from NLP
+        nlp_relevance_terms = ['demo', 'pricing', 'quote', 'feature', 'trial', 'consultation', 'information', 'detail', 'specification', 'benefit', 'capability']
+        for term in nlp_relevance_terms:
+            if any(term in kw for kw in nlp_keywords_lower):
+                relevance_score += 10
+                found_nlp.append(f"nlp_relevance:{term}")
+
+        # Intent keywords from NLP
+        nlp_intent_terms = ['buy', 'purchase', 'order', 'interested', 'need', 'urgent', 'deadline', 'asap']
+        for term in nlp_intent_terms:
+            if any(term in kw for kw in nlp_keywords_lower):
+                intent_score += 5
+                found_nlp.append(f"nlp_intent:{term}")
+
+        # Potential from NLP (business-focused keywords)
+        nlp_potential_terms = ['business', 'company', 'organization', 'team', 'project', 'solution', 'implementation']
+        for term in nlp_potential_terms:
+            if any(term in kw for kw in nlp_keywords_lower):
+                potential_score += 5
+                found_nlp.append(f"nlp_potential:{term}")
 
     # Boost potential if job_title words appear in message
     if job_title_lower:
@@ -204,18 +288,20 @@ def judge_lead(message, job_title=None, source=None, company=None):
         label = "Warm"
 
     # Reason
-    all_positive = found_relevance + found_intent + found_potential
+    all_positive = found_relevance + found_intent + found_potential + found_nlp
     all_negative = found_negative_potential
     positive_count = len(all_positive)
     negative_count = len(all_negative)
+
+    nlp_info = f", NLP: {found_nlp}" if found_nlp else ""
 
     if all_positive and all_negative:
         if negative_count >= positive_count + 3:
             reason = f"Negative potential indicators: {all_negative}"
         else:
-            reason = f"Mixed signals. Relevance: {found_relevance}, Intent: {found_intent}, Potential: {found_potential}, Negative: {all_negative}"
+            reason = f"Mixed signals. Relevance: {found_relevance}, Intent: {found_intent}, Potential: {found_potential}{nlp_info}, Negative: {all_negative}"
     elif all_positive:
-        reason = f"Positive indicators - Relevance: {found_relevance}, Intent: {found_intent}, Potential: {found_potential}"
+        reason = f"Positive indicators - Relevance: {found_relevance}, Intent: {found_intent}, Potential: {found_potential}{nlp_info}"
     elif all_negative:
         reason = f"Negative potential indicators: {all_negative}"
     else:

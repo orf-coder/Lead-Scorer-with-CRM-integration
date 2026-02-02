@@ -95,12 +95,15 @@ y_true = csvfile_df['Label'].values
 # Predict
 y_pred = model.predict(messages)
 
+# Get unique labels from true data
+unique_labels = sorted(list(set(y_true)))
+
 # Compute confusion matrix
-cm = confusion_matrix(y_true, y_pred, labels=['Hot', 'Warm', 'Cold'])
+cm = confusion_matrix(y_true, y_pred, labels=unique_labels)
 
 # Plot confusion matrix
 plt.figure(figsize=(8, 6))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['Hot', 'Warm', 'Cold'], yticklabels=['Hot', 'Warm', 'Cold'])
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=unique_labels, yticklabels=unique_labels)
 plt.title('Confusion Matrix for Ensemble Model on csvfile.csv')
 plt.xlabel('Predicted Label')
 plt.ylabel('True Label')

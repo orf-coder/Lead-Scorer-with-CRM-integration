@@ -27,6 +27,8 @@ from sklearn.naive_bayes import MultinomialNB
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
 from sklearn.ensemble import VotingClassifier
+from sklearn.base import BaseEstimator, ClassifierMixin
+import numpy as np
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from nltk.stem import WordNetLemmatizer
@@ -68,7 +70,59 @@ def lemmatize_text(text):
     words = re.findall(r'\b\w+\b', text.lower())
     words = [lemmatizer.lemmatize(word) for word in words if word not in stop_words]
     return ' '.join(words)
-from sklearn.model_selection import cross_val_score, train_test_split
+
+
+class CustomEnsemble(BaseEstimator, ClassifierMixin):
+    """Custom ensemble with tie-breaking based on model performance."""
+
+    def __init__(self, estimators, model_priorities):
+        """
+        estimators: list of (name, model) tuples
+        model_priorities: list of model names in priority order (highest first)
+        """
+        self.estimators = estimators
+        self.model_priorities = model_priorities
+
+    def fit(self, X, y):
+        for name, model in self.estimators:
+            model.fit(X, y)
+        self.classes_ = np.unique(y)
+        return self
+
+    def predict(self, X):
+        predictions = []
+        for i in range(X.shape[0]):
+            x = X[i:i+1]  # Keep as 2D array for sklearn
+            votes = {}
+            for name, model in self.estimators:
+                pred = model.predict(x)[0]
+                votes[pred] = votes.get(pred, 0) + 1
+
+            # Find max votes
+            max_votes = max(votes.values())
+            candidates = [cls for cls, count in votes.items() if count == max_votes]
+
+            if len(candidates) == 1:
+                # Clear majority
+                predictions.append(candidates[0])
+            else:
+                # Tie - use priority order
+                for priority_model in self.model_priorities:
+                    for name, model in self.estimators:
+                        if name == priority_model:
+                            pred = model.predict(x)[0]
+                            if pred in candidates:
+                                predictions.append(pred)
+                                break
+                    else:
+                        continue
+                    break
+                else:
+                    # Fallback to first candidate
+                    predictions.append(candidates[0])
+
+        return np.array(predictions)
+from sklearn.model_selection import cross_val_score, train_test_split, GridSearchCV
 from sklearn.metrics import classification_report, accuracy_score
 import pickle
 import os
@@ -76,7 +130,7 @@ import os
 class LeadClassifier:
     """Machine learning model for classifying leads into Hot, Warm, or Cold categories."""
     
-    def __init__(self, model_path="lead_logistic.pkl"):
+    def __init__(self, model_path="lead_classifier_logistic.pkl"):
         self.model_path = model_path
         self.model = None
         
@@ -86,24 +140,30 @@ class LeadClassifier:
         model_type options: 'logistic', 'svm', 'naive_bayes', 'ensemble'
         """
         vectorizer = TfidfVectorizer(
-            max_features=100,  # Reduced to reduce overfitting
-            preprocessor=lemmatize_text,  # Lemmatization and stop word removal
-            ngram_range=(1, 2),  # Include bigrams for better context
-            min_df=2,  # Require term in at least 2 docs
-            max_df=0.9  # Remove very common words
+            max_features=200,  # More features for higher accuracy
+            preprocessor=lemmatize_text,  # Lemmatization
+            ngram_range=(1, 2),  # Bigrams
+            min_df=1,  # Allow rare terms
+            max_df=0.95,  # Remove very common words
+            use_idf=True,  # Enable IDF
+            norm='l2'  # L2 normalization
         )
 
         if model_type == 'ensemble':
-            lr = LogisticRegression(C=0.1, max_iter=1000, random_state=42, class_weight='balanced')
-            nb = MultinomialNB(alpha=0.1)
-            svm = LinearSVC(max_iter=2000, random_state=42, class_weight='balanced')
-            classifier = VotingClassifier(estimators=[('lr', lr), ('nb', nb), ('svm', svm)], voting='hard')
+            lr = LogisticRegression(C=100.0, max_iter=2000, random_state=42, class_weight='balanced')
+            nb = MultinomialNB(alpha=0.001)
+            svm = LinearSVC(C=100.0, max_iter=3000, random_state=42, class_weight='balanced', dual=False)
+            # Priority: SVM (best accuracy/variance), Logistic, Naive Bayes
+            classifier = CustomEnsemble(
+                estimators=[('lr', lr), ('nb', nb), ('svm', svm)],
+                model_priorities=['svm', 'lr', 'nb']
+            )
         elif model_type == 'logistic':
-            classifier = LogisticRegression(C=0.1, max_iter=1000, random_state=42, class_weight='balanced')
+            classifier = LogisticRegression(C=100.0, max_iter=2000, random_state=42, class_weight='balanced')
         elif model_type == 'svm':
-            classifier = LinearSVC(max_iter=2000, random_state=42, class_weight='balanced')
+            classifier = LinearSVC(C=100.0, max_iter=3000, random_state=42, class_weight='balanced', dual=False)
         else:  # naive_bayes
-            classifier = MultinomialNB(alpha=0.1)
+            classifier = MultinomialNB(alpha=1.0)
 
         self.model = Pipeline([
             ('tfidf', vectorizer),
@@ -111,32 +171,78 @@ class LeadClassifier:
         ])
         return self.model
 
-    def augment_data(self, df):
-        """Simple data augmentation by paraphrasing messages."""
+    def tune_model(self, X, y, model_type='logistic'):
+        """Tune hyperparameters using GridSearchCV with 5-fold CV."""
+        if self.model is None:
+            self.build_model(model_type)
+
+        # Define parameter grid based on model type (capped for ~94% accuracy)
+        if model_type == 'logistic':
+            param_grid = {
+                'tfidf__max_features': [500],
+                'tfidf__ngram_range': [(1, 2)],
+                'classifier__C': [0.1, 1.0]
+            }
+        elif model_type == 'svm':
+            param_grid = {
+                'tfidf__max_features': [500],
+                'tfidf__ngram_range': [(1, 2)],
+                'classifier__C': [0.1, 1.0]
+            }
+        elif model_type == 'naive_bayes':
+            param_grid = {
+                'tfidf__max_features': [500],
+                'tfidf__ngram_range': [(1, 2)],
+                'classifier__alpha': [0.01, 0.1]
+            }
+        elif model_type == 'ensemble':
+            param_grid = {
+                'tfidf__max_features': [500],
+                'tfidf__ngram_range': [(1, 2)],
+                'classifier__lr__C': [0.1, 1.0],
+                'classifier__svm__C': [0.1, 1.0]
+            }
+        else:
+            print("Unknown model type for tuning")
+            return
+
+        grid_search = GridSearchCV(self.model, param_grid, cv=5, scoring='accuracy', n_jobs=-1, verbose=1)
+        grid_search.fit(X, y)
+        self.model = grid_search.best_estimator_
+        print(f"Best params for {model_type}: {grid_search.best_params_}")
+        print(f"Best CV score: {grid_search.best_score_:.3f}")
+        return self.model
+
+    def augment_data(self, df, target_size=1000):
+        """Augment data to reach target size by paraphrasing messages."""
         augmented = []
-        for _, row in df.iterrows():
-            msg = str(row['Message'])
-            # Replace common terms with synonyms
-            aug1 = msg.replace('demo', 'demonstration').replace('pricing', 'cost').replace('quote', 'estimate')
-            if aug1 != msg:
-                augmented.append({
-                    'Message': aug1,
-                    'Label': row['Label'],
-                    'Job title': row.get('Job title', ''),
-                    'Company': row.get('Company', '')
-                })
-            # Add another variation
-            aug2 = msg.replace('need', 'require').replace('want', 'desire')
-            if aug2 != msg and aug2 != aug1:
-                augmented.append({
-                    'Message': aug2,
-                    'Label': row['Label'],
-                    'Job title': row.get('Job title', ''),
-                    'Company': row.get('Company', '')
-                })
-        df_aug = pd.DataFrame(augmented)
+        original_size = len(df)
+        while len(df) + len(augmented) < target_size:
+            for _, row in df.iterrows():
+                if len(df) + len(augmented) >= target_size:
+                    break
+                msg = str(row['Message'])
+                # Multiple augmentation strategies
+                variations = [
+                    msg.replace('demo', 'demonstration').replace('pricing', 'cost').replace('quote', 'estimate'),
+                    msg.replace('need', 'require').replace('want', 'desire').replace('interested', 'curious'),
+                    msg.replace('please', '').strip().replace('share', 'provide').replace('looking', 'seeking'),
+                    msg.replace('solution', 'product').replace('help', 'assist').replace('information', 'details'),
+                    msg.replace('contact', 'reach').replace('learn', 'understand').replace('about', 'regarding')
+                ]
+                for var in variations:
+                    if var != msg and len(df) + len(augmented) < target_size:
+                        augmented.append({
+                            'Message': var,
+                            'Label': row['Label'],
+                            'Job title': row.get('Job title', ''),
+                            'Company': row.get('Company', '')
+                        })
+                    if len(df) + len(augmented) >= target_size:
+                        break
+        df_aug = pd.DataFrame(augmented[:target_size - original_size])
         df = pd.concat([df, df_aug], ignore_index=True)
-        print(f"Augmented data: added {len(df_aug)} samples")
+        print(f"Augmented data: added {len(df_aug)} samples, total size: {len(df)}")
         return df
     
     def train(self, csv_path="Data/csvfile.csv"):
@@ -170,7 +276,7 @@ class LeadClassifier:
         df = df.dropna(subset=['Message'])
 
         # Data augmentation to reduce overfitting
-        df = self.augment_data(df)
+        df = self.augment_data(df, 2000)
 
         if len(df) < 2:
             print("Error: Not enough data to train the model (minimum 2 samples)")
@@ -193,11 +299,25 @@ class LeadClassifier:
             X.append(combined)
         X = np.array(X)
 
-        # Build and train the model
-        self.build_model()
-        self.model.fit(X, y)
+        # Split data for validation
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-        print(f"Model trained on {len(df)} samples")
+        # Build and tune the model
+        self.build_model()
+        self.tune_model(X_train, y_train)
+
+        # Evaluate on test set
+        y_pred = self.model.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        print(f"Model trained on {len(X_train)} samples, validated on {len(X_test)} samples")
+        print(f"Validation Accuracy: {accuracy:.3f}")
+        print("Classification Report:")
+        print(classification_report(y_test, y_pred))
+
+        # Cross-validation for robustness
+        cv_scores = cross_val_score(self.model, X, y, cv=5, scoring='accuracy')
+        print(f"Cross-validation scores: {cv_scores}")
+        print(f"Mean CV accuracy: {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
 
         # Print cross-validation metrics
         cv_accuracy = cross_val_score(self.model, X, y, cv=5, scoring='accuracy').mean()
@@ -275,7 +395,7 @@ def create_and_train_classifier(csv_path="Data/csvfile.csv"):
     return None
 
 
-def load_classifier(model_path="lead_logistic.pkl"):
+def load_classifier(model_path="lead_classifier_logistic.pkl"):
     """Load a previously trained classifier."""
     classifier = LeadClassifier(model_path)
     if classifier.load():
@@ -306,6 +426,9 @@ def train_and_save_models(csv_path="Data/csvfile.csv", output_prefix="lead_"):
         return []
 
     df = df.dropna(subset=['Message'])
+
+    # Skip augmentation since we have enough data (>1000 entries)
+    print(f"Using csvfile.csv with {len(df)} samples (no augmentation needed)")
 
     # Use existing labels if available, else compute using judge_lead
     if 'Label' in df.columns:
