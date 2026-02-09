@@ -264,5 +264,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 For questions or support, please open an issue or contact the development team.
 
 ---
-
-**Built with ❤️ using Python and Streamlit**
